@@ -1,0 +1,12 @@
+[package]
+name = "canonic"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["alloc"]
+alloc = []
+std = ["alloc"] # std implies alloc
+
+[dependencies]
+rstest = "0.25.0"
