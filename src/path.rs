@@ -212,6 +212,87 @@ impl Path {
     pub fn traverse_symlinks(self) -> Self {
         todo!()
     }
+
+    pub fn is_windows_compatible(&self) -> bool {
+        self.segments.iter().all(|s| s.is_windows_compatible())
+    }
+
+    pub fn is_unix_compatible(&self) -> bool {
+        self.segments.iter().all(|s| s.is_unix_compatible())
+    }
+}
+
+impl PathSegment {
+    pub fn is_windows_compatible(&self) -> bool {
+        const RESERVED_NAMES: [&str; 22] = [
+            "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+            "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+        ];
+
+        let segment = self.0.as_str();
+
+        if segment.is_empty() {
+            return false;
+        }
+
+        assert!(!segment.contains('/'));
+        assert!(!segment.contains('\\'));
+
+        for c in segment.chars() {
+            let c_u32 = c as u32;
+            if c_u32 < 0x20 || matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*') {
+                return false;
+            }
+        }
+
+        if let Some(last) = segment.chars().rev().next() {
+            if last == '.' || last == ' ' {
+                return false;
+            }
+        }
+
+        let name_end = segment.find('.').unwrap_or(segment.len());
+
+        let mut is_reserved = false;
+        for &reserved in RESERVED_NAMES.iter() {
+            if segment.len() >= reserved.len() {
+                let mut matches = true;
+
+                for (i, rc) in reserved.chars().enumerate() {
+                    let sc = segment.as_bytes()[i] as char;
+                    if !rc.eq_ignore_ascii_case(&sc) {
+                        matches = false;
+                        break;
+                    }
+                }
+
+                if matches && name_end == reserved.len() {
+                    is_reserved = true;
+                    break;
+                }
+            }
+        }
+
+        !is_reserved
+    }
+
+    pub fn is_unix_compatible(&self) -> bool {
+        let segment = &self.0;
+
+        if segment.is_empty() {
+            return false;
+        }
+
+        assert!(!segment.contains('/'));
+
+        for c in segment.chars() {
+            if c == '\0' {
+                return false;
+            }
+        }
+
+        true
+    }
 }
 
 impl FromStr for Path {
@@ -227,6 +308,8 @@ impl FromStr for Path {
         for segment in s.replace(r"\", "/").split('/') {
             if !segment.is_empty() {
                 path.segments.push(PathSegment::from_str(segment)?);
+            } else {
+                return Err("path segments cannot be empty");
             }
         }
 
@@ -430,9 +513,74 @@ mod test {
 
         // assert
         let expected = expected.map(|e| Path::from_str(e).unwrap());
-        // assert_eq!(relative, expected);
+        assert_eq!(relative, expected);
+
         let relative_str = relative.map(|p| p.builder().with_resolver(true).build());
         let expected_str = expected.map(|p| p.builder().with_resolver(true).build());
         assert_eq!(relative_str, expected_str);
+    }
+
+    #[rstest]
+    #[case("a", true)]
+    #[case(".a", true)]
+    #[case("a.", false)]
+    #[case("a b", true)]
+    #[case("a ", false)]
+    #[case("a:", false)]
+    #[case(":a", false)]
+    #[case("a>", false)]
+    #[case("a<", false)]
+    #[case("a\"", false)]
+    #[case("a|", false)]
+    #[case("a?", false)]
+    #[case("a*", false)]
+    #[case("a\0", false)]
+    fn is_windows_compatible(#[case] path: &str, #[case] expected: bool) {
+        // arrange
+        let path = Path::from_str(path).unwrap();
+
+        // act
+        let compatible = path.is_windows_compatible();
+
+        // assert
+        assert_eq!(compatible, expected);
+    }
+
+    #[rstest]
+    #[case("a", true)]
+    #[case(".a", true)]
+    #[case("a.", true)]
+    #[case("a b", true)]
+    #[case("a ", true)]
+    #[case("a:", true)]
+    #[case(":a", true)]
+    #[case("a>", true)]
+    #[case("a<", true)]
+    #[case("a\"", true)]
+    #[case("a|", true)]
+    #[case("a?", true)]
+    #[case("a*", true)]
+    #[case("a\0", false)]
+    fn is_unix_compatible(#[case] path: &str, #[case] expected: bool) {
+        // arrange
+        let path = Path::from_str(path).unwrap();
+
+        // act
+        let compatible = path.is_unix_compatible();
+
+        // assert
+        assert_eq!(compatible, expected);
+    }
+
+    #[rstest]
+    #[case("a//")]
+    #[case(r"a\\")]
+    fn path_from_str(#[case] path: &str) {
+        // act
+        let path = Path::from_str(path);
+
+        // assert
+        assert!(path.is_err());
+        assert_eq!(path.unwrap_err(), "path segments cannot be empty");
     }
 }
