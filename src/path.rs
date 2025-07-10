@@ -106,7 +106,13 @@ impl Path {
             base_segments.remove(base_segments.head.unwrap());
         }
 
-        for _ in 0..base_segments.len() {
+        let len = base_segments.len();
+
+        if len == base.segments.len() {
+            return None;
+        }
+
+        for _ in 0..len {
             segments.push_start("..".to_string());
         }
 
@@ -412,8 +418,8 @@ mod test {
     #[case("a/b/c", "a/d/e", Some("../../b/c"))]
     #[case("a/b/.c", "a/b", Some(".c"))]
     #[case("a/b/.c", "a/b/d", Some("../.c"))]
-    #[case("a/b/.c", "a/d/e", Some("../../b/.c"))]
-    #[case("a/b/.c", "a/b.d", Some("../b/.c"))]
+    #[case("a/b/c.d", "a/b/d", Some("../c.d"))]
+    #[case("a/b/c.d", "a/b.d", Some("../b/c.d"))]
     fn relative_to(#[case] path: &str, #[case] base: &str, #[case] expected: Option<&str>) {
         // arrange
         let path = Path::from_str(path).unwrap();
