@@ -1,6 +1,9 @@
 use core::str::FromStr;
 
-use alloc::{string::String, vec::Vec};
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
 
 use crate::{
     builder::StringPathBuilder,
@@ -82,6 +85,37 @@ impl Path {
         Some(&basename[..last])
     }
 
+    pub fn relative_to(&self, base: &Path) -> Option<Self> {
+        if self.is_absolute() && base.is_absolute() && self.root() != base.root() {
+            return None;
+        }
+
+        let mut segments = self.segments.clone();
+        let mut base_segments = base.segments.clone();
+
+        // Remove common prefix
+        while segments.head.is_some() && base_segments.head.is_some() {
+            let segment = &segments[segments.head.unwrap()].value;
+            let base_segment = &base_segments[base_segments.head.unwrap()].value;
+
+            if segment != base_segment {
+                break;
+            }
+
+            segments.remove(segments.head.unwrap());
+            base_segments.remove(base_segments.head.unwrap());
+        }
+
+        for _ in 0..base_segments.len() {
+            segments.push_start("..".to_string());
+        }
+
+        Some(Path {
+            segments,
+            has_root: false,
+        })
+    }
+
     pub fn extension(&self) -> Option<&str> {
         let mut basename = self.basename()?;
 
@@ -132,8 +166,10 @@ impl Path {
                 let prev_node = &mut path[prev];
 
                 let Some(prev_prev) = prev_node.prev else {
-                    path.remove(prev);
-                    path.remove(index);
+                    if prev_node.value.0 != ".." {
+                        path.remove(prev);
+                        path.remove(index);
+                    }
 
                     let Some(next) = next else {
                         return path;
@@ -367,5 +403,30 @@ mod test {
         // assert
         let expected_parent = Path::from_str("a/b").unwrap();
         assert_eq!(dirname, Some(expected_parent));
+    }
+
+    #[rstest]
+    #[case("a/b/c", "b/b/c", None)]
+    #[case("a/b/c", "a/b", Some("c"))]
+    #[case("a/b/c", "a/b/d", Some("../c"))]
+    #[case("a/b/c", "a/d/e", Some("../../b/c"))]
+    #[case("a/b/.c", "a/b", Some(".c"))]
+    #[case("a/b/.c", "a/b/d", Some("../.c"))]
+    #[case("a/b/.c", "a/d/e", Some("../../b/.c"))]
+    #[case("a/b/.c", "a/b.d", Some("../b/.c"))]
+    fn relative_to(#[case] path: &str, #[case] base: &str, #[case] expected: Option<&str>) {
+        // arrange
+        let path = Path::from_str(path).unwrap();
+        let base = Path::from_str(base).unwrap();
+
+        // act
+        let relative = path.relative_to(&base);
+
+        // assert
+        let expected = expected.map(|e| Path::from_str(e).unwrap());
+        // assert_eq!(relative, expected);
+        let relative_str = relative.map(|p| p.builder().with_resolver(true).build());
+        let expected_str = expected.map(|p| p.builder().with_resolver(true).build());
+        assert_eq!(relative_str, expected_str);
     }
 }
