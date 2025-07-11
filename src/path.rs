@@ -8,22 +8,24 @@ use alloc::{
 use crate::{
     builder::StringPathBuilder,
     packed_list::{Node, PathSegmentList},
+    parser,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Path {
-    segments: PathSegmentList,
-    has_root: bool,
+    pub(crate) prefix: Option<Prefix>,
+    pub(crate) drive: Option<Drive>,
+    pub(crate) root: Option<Root>,
+    pub(crate) segments: PathSegmentList,
 }
-
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub(crate) struct PathSegment(pub(crate) String);
 
 impl Path {
     pub fn new() -> Self {
         Path {
             segments: PathSegmentList::new(),
-            has_root: false,
+            prefix: None,
+            drive: None,
+            root: None,
         }
     }
 
@@ -32,7 +34,7 @@ impl Path {
     }
 
     pub fn has_root(&self) -> bool {
-        self.has_root
+        self.root.is_some()
     }
 
     pub fn join(mut self, path: impl Into<Path>) -> Self {
@@ -58,11 +60,11 @@ impl Path {
     }
 
     pub fn is_absolute(&self) -> bool {
-        self.has_root
+        self.has_root()
     }
 
     pub fn is_relative(&self) -> bool {
-        !self.has_root
+        !self.has_root()
     }
 
     pub fn basename(&self) -> Option<&str> {
@@ -118,12 +120,14 @@ impl Path {
 
         Some(Path {
             segments,
-            has_root: false,
+            prefix: None,
+            drive: None,
+            root: None,
         })
     }
 
     pub fn extension(&self) -> Option<&str> {
-        let mut basename = self.basename()?;
+        let basename = self.basename()?;
 
         if basename.is_empty() {
             return None;
@@ -147,10 +151,31 @@ impl Path {
         Some(self)
     }
 
-    pub fn resolve(mut self) -> Self {
+    pub fn resolve(mut self) -> Result<Self, &'static str> {
         let Some(head_index) = self.segments.head else {
-            return self;
+            return Ok(self);
         };
+
+        if let Some(Node {
+            value: PathSegment(s),
+            ..
+        }) = self.segments.head()
+        {
+            if s == "~" {
+                // resolve home
+                // remove ~
+                // join home with self
+                let home = dirs::home_dir().ok_or_else(|| "couldn't resolve home")?;
+                let path = Path::from_str(
+                    home.to_str()
+                        .expect("home must be valid on its own operating system"),
+                )?;
+
+                let head = self.segments.head.expect("head exists as a ~");
+                self.segments.remove(head);
+                self = path.join(self);
+            }
+        }
 
         fn traverse(mut path: PathSegmentList, index: usize) -> PathSegmentList {
             let node = &path[index];
@@ -206,7 +231,7 @@ impl Path {
         }
 
         self.segments = traverse(self.segments, head_index);
-        self
+        Ok(self)
     }
 
     pub fn traverse_symlinks(self) -> Self {
@@ -221,6 +246,45 @@ impl Path {
         self.segments.iter().all(|s| s.is_unix_compatible())
     }
 }
+
+impl FromStr for Path {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        parser::parse_path(s)
+    }
+}
+
+impl From<PathSegmentList> for Path {
+    fn from(segments: PathSegmentList) -> Self {
+        Path {
+            segments,
+            prefix: None,
+            drive: None,
+            root: None,
+        }
+    }
+}
+
+impl<P: Into<PathSegment>> From<P> for Path {
+    fn from(segment: P) -> Self {
+        Path {
+            segments: PathSegmentList::from(segment),
+            prefix: None,
+            drive: None,
+            root: None,
+        }
+    }
+}
+
+impl Default for Path {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct PathSegment(pub(crate) String);
 
 impl PathSegment {
     pub fn is_windows_compatible(&self) -> bool {
@@ -295,52 +359,6 @@ impl PathSegment {
     }
 }
 
-impl FromStr for Path {
-    type Err = &'static str;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.is_empty() {
-            return Ok(Self::new());
-        }
-
-        let mut path = Self::new();
-
-        for segment in s.replace(r"\", "/").split('/') {
-            if !segment.is_empty() {
-                path.segments.push(PathSegment::from_str(segment)?);
-            } else {
-                return Err("path segments cannot be empty");
-            }
-        }
-
-        Ok(path)
-    }
-}
-
-impl From<PathSegmentList> for Path {
-    fn from(segments: PathSegmentList) -> Self {
-        Path {
-            segments,
-            has_root: false,
-        }
-    }
-}
-
-impl<P: Into<PathSegment>> From<P> for Path {
-    fn from(segment: P) -> Self {
-        Path {
-            segments: PathSegmentList::from(segment),
-            has_root: false,
-        }
-    }
-}
-
-impl Default for Path {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl From<String> for PathSegment {
     fn from(segment: String) -> Self {
         PathSegment(segment)
@@ -351,8 +369,29 @@ impl FromStr for PathSegment {
     type Err = &'static str;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.contains('/') || s.contains('\\') {
+            return Err("path segment cannot contain path separators");
+        }
+
         Ok(Self(s.into()))
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Prefix {
+    ExtendedPath,
+    Device,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct Drive {
+    pub letter: char,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Root {
+    Normal,
+    Unc,
 }
 
 #[cfg(test)]
@@ -526,7 +565,7 @@ mod test {
     #[case("a.", false)]
     #[case("a b", true)]
     #[case("a ", false)]
-    #[case("a:", false)]
+    #[case("a:", true)] // becomes a drive
     #[case(":a", false)]
     #[case("a>", false)]
     #[case("a<", false)]
@@ -582,5 +621,264 @@ mod test {
         // assert
         assert!(path.is_err());
         assert_eq!(path.unwrap_err(), "path segments cannot be empty");
+    }
+
+    // C:\Users\Alice\Documents\file.txt        drive - rooted path
+    // D:\Projects\code.py                      drive - rooted path
+    #[rstest]
+    #[case(r"C:\Users\Alice\Documents\file.txt", 'C', 4)]
+    #[case(r"D:\Projects\code.py", 'D', 2)]
+    fn win_drive_rooted(#[case] path: &str, #[case] drive: char, #[case] len: usize) {
+        // act
+        let path = Path::from_str(path);
+
+        // assert
+        assert!(path.is_ok());
+        let path = path.unwrap();
+        assert!(path.prefix.is_none());
+        assert!(path.drive.is_some());
+        assert_eq!(path.drive.unwrap().letter, drive);
+        assert!(path.root.is_some());
+        assert_eq!(path.root.unwrap(), Root::Normal);
+        assert_eq!(path.segments.len(), len);
+    }
+
+    // \Windows\System32\cmd.exe                rooted path
+    #[rstest]
+    #[case(r"\Windows\System32\cmd.exe", 3)]
+    fn win_rooted(#[case] path: &str, #[case] len: usize) {
+        // act
+        let path = Path::from_str(path);
+
+        // assert
+        assert!(path.is_ok());
+        let path = path.unwrap();
+        assert!(path.prefix.is_none());
+        assert!(path.drive.is_none());
+        assert!(path.root.is_some());
+        assert_eq!(path.root.unwrap(), Root::Normal);
+        assert_eq!(path.segments.len(), len);
+    }
+
+    // ..\Documents\file.txt                    relative path
+    // .\file.txt                               relative path
+    // file.txt                                 relative path
+    #[rstest]
+    #[case(r"..\Documents\file.txt", 3)]
+    #[case(r".\file.txt", 2)]
+    #[case(r"file.txt", 1)]
+    fn win_relative(#[case] path: &str, #[case] len: usize) {
+        // act
+        let path = Path::from_str(path);
+
+        // assert
+        assert!(path.is_ok());
+        let path = path.unwrap();
+        assert!(path.prefix.is_none());
+        assert!(path.drive.is_none());
+        assert!(path.root.is_none());
+        assert_eq!(path.segments.len(), len);
+    }
+
+    // \\Server\Share\folder\file.txt           unc rooted path
+    #[rstest]
+    #[case(r"\\Server\Share\folder\file.txt", 4)]
+    fn unc(#[case] path: &str, #[case] len: usize) {
+        // act
+        let path = Path::from_str(path);
+
+        // assert
+        assert!(path.is_ok());
+        let path = path.unwrap();
+        assert!(path.prefix.is_none());
+        assert!(path.drive.is_none());
+        assert!(path.root.is_some());
+        assert_eq!(path.root.unwrap(), Root::Unc);
+        assert_eq!(path.segments.len(), len);
+    }
+
+    // \\?\C:\Very\Long\Path\file.txt           extended-length - drive - rooted path
+    #[rstest]
+    #[case(r"\\?\C:\Very\Long\Path\file.txt", 'C', 4)]
+    fn win_extended_length_drive_rooted(
+        #[case] path: &str,
+        #[case] drive: char,
+        #[case] len: usize,
+    ) {
+        // act
+        let path = Path::from_str(path);
+
+        // assert
+        assert!(path.is_ok());
+        let path = path.unwrap();
+        assert!(path.prefix.is_some());
+        assert_eq!(path.prefix.unwrap(), Prefix::ExtendedPath);
+        assert!(path.drive.is_some());
+        assert_eq!(path.drive.unwrap().letter, drive);
+        assert!(path.root.is_some());
+        assert_eq!(path.root.unwrap(), Root::Normal);
+        assert_eq!(path.segments.len(), len);
+    }
+
+    // \\.\C:\path\to\file.txt           device - drive - rooted path
+    #[rstest]
+    #[case(r"\\.\C:\path\to\file.txt", 'C', 3)]
+    fn win_device_drive_rooted(#[case] path: &str, #[case] drive: char, #[case] len: usize) {
+        // act
+        let path = Path::from_str(path);
+
+        // assert
+        assert!(path.is_ok());
+        let path = path.unwrap();
+        assert!(path.prefix.is_some());
+        assert_eq!(path.prefix.unwrap(), Prefix::Device);
+        assert!(path.drive.is_some());
+        assert_eq!(path.drive.unwrap().letter, drive);
+        assert!(path.root.is_some());
+        assert_eq!(path.root.unwrap(), Root::Normal);
+        assert_eq!(path.segments.len(), len);
+    }
+
+    // \\?\UNC\server\store\very\long\path\file.txt           extended-length - drive - rooted path
+    #[rstest]
+    #[case(r"\\?\UNC\server\store\very\long\path\file.txt", 6)]
+    fn win_extended_length_unc(#[case] path: &str, #[case] len: usize) {
+        // act
+        let path = Path::from_str(path);
+
+        // assert
+        assert!(path.is_ok());
+        let path = path.unwrap();
+        assert!(path.prefix.is_some());
+        assert_eq!(path.prefix.unwrap(), Prefix::ExtendedPath);
+        assert!(path.drive.is_none());
+        assert!(path.root.is_some());
+        assert_eq!(path.root.unwrap(), Root::Unc);
+        assert_eq!(path.segments.len(), len);
+    }
+
+    // C:folder\file.txt                        drive - relative path
+    #[rstest]
+    #[case(r"C:folder\file.txt", 'C', 2)]
+    fn win_drive_relative(#[case] path: &str, #[case] drive: char, #[case] len: usize) {
+        // act
+        let path = Path::from_str(path);
+
+        // assert
+        assert!(path.is_ok());
+        let path = path.unwrap();
+        assert!(path.prefix.is_none());
+        assert!(path.drive.is_some());
+        assert_eq!(path.drive.unwrap().letter, drive);
+        assert!(path.root.is_none());
+        assert_eq!(path.segments.len(), len);
+    }
+
+    // \\.\pipe\my-pipe                         device prefix - path to device
+    // \\.\COM1                                 device prefix - path to device
+    // \\.\PhysicalDrive0                       device prefix - path to device
+    #[rstest]
+    #[case(r"\\.\pipe\my-pipe", 2)]
+    #[case(r"\\.\COM1", 1)]
+    #[case(r"\\.\PhysicalDrive0", 1)]
+    fn win_device(#[case] path: &str, #[case] len: usize) {
+        // act
+        let path = Path::from_str(path);
+
+        // assert
+        assert!(path.is_ok());
+        let path = path.unwrap();
+        assert!(path.prefix.is_some());
+        assert_eq!(path.prefix.unwrap(), Prefix::Device);
+        assert!(path.drive.is_none());
+        assert!(path.root.is_none());
+        assert_eq!(path.segments.len(), len);
+    }
+
+    // /home/alice/file.txt                     rooted path
+    // /etc/hosts                               rooted path
+    // /tmp/file.txt                            rooted path
+    #[rstest]
+    #[case(r"/home/alice/file.txt", 3)]
+    #[case(r"/etc/hosts", 2)]
+    #[case(r"/tmp/file.txt", 2)]
+    fn rooted(#[case] path: &str, #[case] len: usize) {
+        // act
+        let path = Path::from_str(path);
+
+        // assert
+        assert!(path.is_ok());
+        let path = path.unwrap();
+        assert!(path.prefix.is_none());
+        assert!(path.drive.is_none());
+        assert!(path.root.is_some());
+        assert_eq!(path.root.unwrap(), Root::Normal);
+        assert_eq!(path.segments.len(), len);
+    }
+
+    // ./file.txt                               relative path
+    // ../file.txt                              relative path
+    // file.txt                                 relative path
+    // ../../etc/passwd                         relative path
+    #[rstest]
+    #[case(r"./file.txt", 2)]
+    #[case(r"../file.txt", 2)]
+    #[case(r"file.txt", 1)]
+    #[case(r"../../etc/passwd", 4)]
+    fn relative(#[case] path: &str, #[case] len: usize) {
+        // act
+        let path = Path::from_str(path);
+
+        // assert
+        assert!(path.is_ok());
+        let path = path.unwrap();
+        assert!(path.prefix.is_none());
+        assert!(path.drive.is_none());
+        assert!(path.root.is_none());
+        assert_eq!(path.segments.len(), len);
+    }
+
+    // ~/file.txt                               user-relative path
+    #[rstest]
+    #[case(r"~/file.txt", 2)]
+    fn user_relative(#[case] path: &str, #[case] len: usize) {
+        // act
+        let path = Path::from_str(path);
+
+        // assert
+        assert!(path.is_ok());
+        let path = path.unwrap();
+        assert!(path.prefix.is_none());
+        assert!(path.drive.is_none());
+        assert!(path.root.is_none());
+        assert_eq!(path.segments.len(), len);
+    }
+
+    #[cfg(feature = "std")]
+    #[rstest]
+    #[case(r"~/a/b/./c/../d/e.txt", r"~/a/b/d/e.txt")]
+    #[case(r"\\.\path/to/../over\here", r"//./path/over/here")]
+    #[case(r"//?/c:/path/./do spaces work?", r"//?/c:/path/do spaces work?")]
+    #[case(
+        r"\\?\UNC\server\store\..\files\file.txt",
+        r"//?/UNC/server/files/file.txt"
+    )]
+    fn combine_them_all(#[case] path: &str, #[case] expected: &str) {
+        let home = dirs::home_dir().unwrap();
+        let home = home.to_str().unwrap();
+        let expected = expected.replace("~", home);
+        let path = Path::from_str(path);
+        assert!(path.is_ok());
+        let path = path.unwrap();
+
+        let resolved = path
+            .builder()
+            .with_separator('/')
+            .with_resolver(true)
+            .build();
+
+        assert!(resolved.is_ok());
+        let resolved = resolved.unwrap();
+        assert_eq!(resolved, expected);
     }
 }

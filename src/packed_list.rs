@@ -1,10 +1,7 @@
 use core::ops::{Index, IndexMut};
 
 use crate::path::PathSegment;
-use alloc::{
-    collections::btree_set::BTreeSet,
-    vec::{IntoIter, Vec},
-};
+use alloc::vec::Vec;
 
 #[derive(Debug, Clone, Eq)]
 pub(crate) struct PathSegmentList {
@@ -39,21 +36,8 @@ impl PathSegmentList {
         self.head.and_then(|index| self.nodes.get(index))
     }
 
-    pub(crate) fn tail(&self) -> Option<&Node> {
-        self.tail.and_then(|index| self.nodes.get(index))
-    }
-
     pub(crate) fn next(&self, node: &Node) -> Option<&Node> {
         node.next.and_then(|next_index| self.nodes.get(next_index))
-    }
-
-    pub(crate) fn next_owned(&mut self, node: &Node) -> Option<Node> {
-        let next_index = node.next?;
-        self.remove(next_index)
-    }
-
-    pub(crate) fn prev(&self, node: &Node) -> Option<&Node> {
-        node.prev.and_then(|prev_index| self.nodes.get(prev_index))
     }
 
     pub(crate) fn free(&mut self, index: usize) -> bool {

@@ -1,10 +1,10 @@
 use alloc::string::String;
 
-use crate::path::Path;
+use crate::path::{Drive, Path, Prefix, Root};
 
 pub struct StringPathBuilder {
     path: Path,
-    separator: String,
+    separator: char,
     resolve: bool,
     traverse_symlinks: bool,
 }
@@ -13,13 +13,13 @@ impl StringPathBuilder {
     pub fn new(path: impl Into<Path>) -> Self {
         StringPathBuilder {
             path: path.into(),
-            separator: String::from("/"),
+            separator: '/',
             resolve: false,
             traverse_symlinks: false,
         }
     }
 
-    pub fn with_separator(mut self, separator: impl Into<String>) -> Self {
+    pub fn with_separator(mut self, separator: impl Into<char>) -> Self {
         self.separator = separator.into();
         self
     }
@@ -34,9 +34,9 @@ impl StringPathBuilder {
         self
     }
 
-    pub fn build(mut self) -> String {
+    pub fn build(mut self) -> Result<String, &'static str> {
         if self.resolve {
-            self.path = self.path.resolve();
+            self.path = self.path.resolve()?;
         }
 
         if self.traverse_symlinks {
@@ -45,19 +45,53 @@ impl StringPathBuilder {
 
         let mut result = String::new();
 
-        if self.path.is_absolute() {
-            result.push_str(&self.separator);
-        }
-
-        for segment in self.path.components().into_iter() {
-            if !result.is_empty() {
-                result.push_str(&self.separator);
+        match self.path.prefix {
+            Some(Prefix::ExtendedPath) => {
+                result.push(self.separator);
+                result.push(self.separator);
+                result.push('?');
+                result.push(self.separator);
             }
-
-            result.push_str(segment);
+            Some(Prefix::Device) => {
+                result.push(self.separator);
+                result.push(self.separator);
+                result.push('.');
+                result.push(self.separator);
+            }
+            None => {}
         }
 
-        result
+        if let Some(Drive { letter }) = self.path.drive {
+            result.push(letter);
+            result.push(':');
+        }
+
+        match self.path.root {
+            Some(Root::Normal) => {
+                result.push(self.separator);
+            }
+            Some(Root::Unc) => {
+                if let Some(Prefix::ExtendedPath) = self.path.prefix {
+                    result.push_str("UNC");
+                    result.push(self.separator);
+                } else {
+                    result.push(self.separator);
+                    result.push(self.separator);
+                }
+            }
+            None => {}
+        }
+
+        let len = self.path.segments.len();
+        for (i, segment) in self.path.segments.into_iter().enumerate() {
+            result.push_str(&segment.0);
+
+            if i < len - 1 {
+                result.push(self.separator);
+            }
+        }
+
+        Ok(result)
     }
 }
 
@@ -74,7 +108,7 @@ mod test {
         let path = Path::from_str("a/b/c").unwrap();
 
         // act
-        let string = StringPathBuilder::new(path).build();
+        let string = StringPathBuilder::new(path).build().unwrap();
 
         // assert
         assert_eq!(string, "a/b/c");
@@ -86,7 +120,10 @@ mod test {
         let path = Path::from_str("a/b/c").unwrap();
 
         // act
-        let string = StringPathBuilder::new(path).with_separator(r"\").build();
+        let string = StringPathBuilder::new(path)
+            .with_separator('\\')
+            .build()
+            .unwrap();
 
         // assert
         assert_eq!(string, r"a\b\c");
@@ -98,7 +135,10 @@ mod test {
         let path = Path::from_str("a/b/./c/../d").unwrap();
 
         // act
-        let string = StringPathBuilder::new(path).with_resolver(true).build();
+        let string = StringPathBuilder::new(path)
+            .with_resolver(true)
+            .build()
+            .unwrap();
 
         // assert
         assert_eq!(string, "a/b/d");
@@ -110,7 +150,10 @@ mod test {
         let path = Path::from_str("../b/c").unwrap();
 
         // act
-        let string = StringPathBuilder::new(path).with_resolver(true).build();
+        let string = StringPathBuilder::new(path)
+            .with_resolver(true)
+            .build()
+            .unwrap();
 
         // assert
         assert_eq!(string, "../b/c");
@@ -122,7 +165,10 @@ mod test {
         let path = Path::from_str("a/b/..").unwrap();
 
         // act
-        let string = StringPathBuilder::new(path).with_resolver(true).build();
+        let string = StringPathBuilder::new(path)
+            .with_resolver(true)
+            .build()
+            .unwrap();
 
         // assert
         assert_eq!(string, "a");
@@ -134,7 +180,10 @@ mod test {
         let path = Path::from_str("..").unwrap();
 
         // act
-        let string = StringPathBuilder::new(path).with_resolver(true).build();
+        let string = StringPathBuilder::new(path)
+            .with_resolver(true)
+            .build()
+            .unwrap();
 
         // assert
         assert_eq!(string, "..");
@@ -146,7 +195,10 @@ mod test {
         let path = Path::from_str("a/..").unwrap();
 
         // act
-        let string = StringPathBuilder::new(path).with_resolver(true).build();
+        let string = StringPathBuilder::new(path)
+            .with_resolver(true)
+            .build()
+            .unwrap();
 
         // assert
         assert_eq!(string, "");
@@ -158,7 +210,7 @@ mod test {
         let path = Path::from_str(r"a/../b/c/../d").unwrap();
 
         // act
-        let string = path.builder().with_resolver(true).build();
+        let string = path.builder().with_resolver(true).build().unwrap();
 
         // assert
         assert_eq!(string, "b/d");
@@ -168,15 +220,57 @@ mod test {
     fn test_resolve() {
         // arrange
         let path = Path::from_str("a/../b/c/../d").unwrap();
-        let path2 = path.clone().resolve();
+        let path2 = path.clone().resolve().unwrap();
         let path3 = Path::from_str("b/d").unwrap();
 
-        let path = path.builder().build();
-        let path2 = path2.builder().with_resolver(true).build();
-        let path3 = path3.builder().with_resolver(true).build();
+        let path = path.builder().build().unwrap();
+        let path2 = path2.builder().with_resolver(true).build().unwrap();
+        let path3 = path3.builder().with_resolver(true).build().unwrap();
 
         // assert
         assert_ne!(path, path2);
         assert_eq!(path2, path3);
+    }
+
+    #[cfg(feature = "std")]
+    #[rstest]
+    fn test_resolve_home() {
+        // arrange
+        let path = Path::from_str("~/.config").unwrap();
+
+        // act
+        let resolved = path.resolve().unwrap();
+
+        // assert
+        let home = dirs::home_dir().unwrap();
+        let home_path = Path::from_str(home.to_str().unwrap()).unwrap();
+        assert_eq!(resolved, home_path.join(Path::from_str(".config").unwrap()));
+    }
+
+    #[cfg(feature = "std")]
+    #[rstest]
+    fn test_resolve_home2() {
+        // arrange
+        let path = Path::from_str("~").unwrap();
+
+        // act
+        let resolved = path.resolve().unwrap();
+
+        // assert
+        let home = dirs::home_dir().unwrap();
+        let home_path = Path::from_str(home.to_str().unwrap()).unwrap();
+        assert_eq!(resolved, home_path);
+    }
+
+    #[rstest]
+    fn tilde_segment_in_path() {
+        // arrange
+        let path = Path::from_str("path/~/file.txt").unwrap();
+
+        // act
+        let resolved = path.clone().resolve().unwrap();
+
+        // assert
+        assert_eq!(resolved, path);
     }
 }

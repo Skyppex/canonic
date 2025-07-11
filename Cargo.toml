@@ -4,9 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["alloc"]
+default = ["std"]
 alloc = []
-std = ["alloc"] # std implies alloc
+std = ["alloc", "dirs"]
 
 [dependencies]
+dirs = { version = "6.0.0", optional = true }
+
+[dev-dependencies]
 rstest = "0.25.0"
