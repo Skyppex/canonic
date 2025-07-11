@@ -8,22 +8,21 @@ use alloc::{
 use crate::{
     builder::StringPathBuilder,
     packed_list::{Node, PathSegmentList},
+    parser,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Path {
     segments: PathSegmentList,
-    has_root: bool,
+    root: Option<Root>,
+    drive: Option<Drive>,
 }
-
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub(crate) struct PathSegment(pub(crate) String);
 
 impl Path {
     pub fn new() -> Self {
         Path {
             segments: PathSegmentList::new(),
-            has_root: false,
+            root: None,
         }
     }
 
@@ -32,7 +31,7 @@ impl Path {
     }
 
     pub fn has_root(&self) -> bool {
-        self.has_root
+        self.root.is_some()
     }
 
     pub fn join(mut self, path: impl Into<Path>) -> Self {
@@ -58,11 +57,11 @@ impl Path {
     }
 
     pub fn is_absolute(&self) -> bool {
-        self.has_root
+        self.has_root()
     }
 
     pub fn is_relative(&self) -> bool {
-        !self.has_root
+        !self.has_root()
     }
 
     pub fn basename(&self) -> Option<&str> {
@@ -118,7 +117,7 @@ impl Path {
 
         Some(Path {
             segments,
-            has_root: false,
+            root: None,
         })
     }
 
@@ -222,6 +221,41 @@ impl Path {
     }
 }
 
+impl FromStr for Path {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        parser::parse_path(s)
+    }
+}
+
+impl From<PathSegmentList> for Path {
+    fn from(segments: PathSegmentList) -> Self {
+        Path {
+            segments,
+            root: None,
+        }
+    }
+}
+
+impl<P: Into<PathSegment>> From<P> for Path {
+    fn from(segment: P) -> Self {
+        Path {
+            segments: PathSegmentList::from(segment),
+            root: None,
+        }
+    }
+}
+
+impl Default for Path {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct PathSegment(pub(crate) String);
+
 impl PathSegment {
     pub fn is_windows_compatible(&self) -> bool {
         const RESERVED_NAMES: [&str; 22] = [
@@ -295,52 +329,6 @@ impl PathSegment {
     }
 }
 
-impl FromStr for Path {
-    type Err = &'static str;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.is_empty() {
-            return Ok(Self::new());
-        }
-
-        let mut path = Self::new();
-
-        for segment in s.replace(r"\", "/").split('/') {
-            if !segment.is_empty() {
-                path.segments.push(PathSegment::from_str(segment)?);
-            } else {
-                return Err("path segments cannot be empty");
-            }
-        }
-
-        Ok(path)
-    }
-}
-
-impl From<PathSegmentList> for Path {
-    fn from(segments: PathSegmentList) -> Self {
-        Path {
-            segments,
-            has_root: false,
-        }
-    }
-}
-
-impl<P: Into<PathSegment>> From<P> for Path {
-    fn from(segment: P) -> Self {
-        Path {
-            segments: PathSegmentList::from(segment),
-            has_root: false,
-        }
-    }
-}
-
-impl Default for Path {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl From<String> for PathSegment {
     fn from(segment: String) -> Self {
         PathSegment(segment)
@@ -353,6 +341,26 @@ impl FromStr for PathSegment {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(Self(s.into()))
     }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Root {
+    pub string: String,
+}
+
+impl Root {
+    pub fn new(string: String) -> Self {
+        Root { string }
+    }
+
+    pub fn is_unc(&self) -> bool {
+        self.string == "//"
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Drive {
+    pub letter: char,
 }
 
 #[cfg(test)]
