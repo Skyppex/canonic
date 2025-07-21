@@ -1,4 +1,6 @@
 use core::str::FromStr;
+#[cfg(feature = "std")]
+use std::ffi::{OsStr, OsString};
 
 use alloc::{
     string::{String, ToString},
@@ -6,7 +8,7 @@ use alloc::{
 };
 
 use crate::{
-    builder::{BaseState, StringPathBuilder},
+    builder::{Base, StringPathBuilder},
     packed_list::{Node, PathSegmentList},
     parser,
 };
@@ -30,7 +32,7 @@ impl Path {
     }
 
     #[allow(private_interfaces)]
-    pub fn builder(self) -> StringPathBuilder<BaseState> {
+    pub fn builder(self) -> StringPathBuilder<Base> {
         StringPathBuilder::new(self)
     }
 
@@ -38,16 +40,55 @@ impl Path {
         self.root.is_some()
     }
 
-    pub fn join(mut self, path: impl Into<Path>) -> Self {
-        for segment in path.into().segments.into_iter() {
+    pub fn join(mut self, path: impl Into<Path>) -> Result<Self, &'static str> {
+        let path = path.into();
+
+        if path.is_absolute() {
+            if self.drive.is_some()
+                && self.root.is_none()
+                && self.prefix.is_none()
+                && self.segments.len() == 0
+            {
+                let mut path = path;
+                path.drive = self.drive;
+                return Ok(path);
+            }
+
+            return Ok(path);
+        }
+
+        match (&self.drive, path.drive) {
+            (
+                Some(Drive {
+                    letter: self_letter,
+                }),
+                Some(Drive {
+                    letter: path_letter,
+                }),
+            ) => {
+                if *self_letter != path_letter {
+                    return Err("cannot join two paths from different drives");
+                }
+            }
+            (None, Some(path_drive)) => self.drive = Some(path_drive),
+            _ => {}
+        }
+
+        for segment in path.segments.into_iter() {
             self.segments.push(segment);
         }
 
-        self
+        Ok(self)
     }
 
     pub fn root(&self) -> Option<Self> {
-        todo!()
+        if !self.has_root() {
+            None
+        } else {
+            let mut clone = self.clone();
+            clone.segments = PathSegmentList::new();
+            Some(clone)
+        }
     }
 
     pub fn dirname(&self) -> Option<&str> {
@@ -56,8 +97,9 @@ impl Path {
         components.pop()
     }
 
+    #[cfg(feature = "std")]
     pub fn exists(&self) -> bool {
-        todo!()
+        self.to_std_path().exists()
     }
 
     pub fn is_absolute(&self) -> bool {
@@ -66,6 +108,25 @@ impl Path {
 
     pub fn is_relative(&self) -> bool {
         !self.has_root()
+    }
+
+    #[cfg(feature = "std")]
+    pub fn is_file(&self) -> bool {
+        self.to_std_path().is_file()
+    }
+
+    #[cfg(feature = "std")]
+    pub fn is_dir(&self) -> bool {
+        self.to_std_path().is_dir()
+    }
+
+    #[cfg(feature = "std")]
+    pub fn is_symlink(&self) -> bool {
+        self.to_std_path().is_symlink()
+    }
+
+    pub fn is_root(&self) -> bool {
+        self.has_root() && self.segments.len() == 0
     }
 
     pub fn basename(&self) -> Option<&str> {
@@ -163,18 +224,18 @@ impl Path {
         }) = self.segments.head()
         {
             if s == "~" {
-                // resolve home
-                // remove ~
-                // join home with self
-                let home = dirs::home_dir().ok_or_else(|| "couldn't resolve home")?;
-                let path = Path::from_str(
-                    home.to_str()
-                        .expect("home must be valid on its own operating system"),
-                )?;
+                #[cfg(feature = "std")]
+                {
+                    let home = dirs::home_dir().ok_or_else(|| "couldn't resolve home")?;
+                    let path = Path::from_str(
+                        home.to_str()
+                            .expect("home must be valid on its own operating system"),
+                    )?;
 
-                let head = self.segments.head.expect("head exists as a ~");
-                self.segments.remove(head);
-                self = path.join(self);
+                    let head = self.segments.head.expect("head exists as a ~");
+                    self.segments.remove(head);
+                    self = path.join(self)?;
+                }
             }
         }
 
@@ -235,8 +296,13 @@ impl Path {
         Ok(self)
     }
 
-    pub fn traverse_symlinks(self) -> Self {
-        todo!()
+    #[cfg(feature = "std")]
+    pub fn traverse_symlinks(self) -> Result<Self, &'static str> {
+        let path = Into::<std::path::PathBuf>::into(self)
+            .canonicalize()
+            .map_err(|_| "couldn't canonicalize path")?;
+
+        TryFrom::<std::path::PathBuf>::try_from(path).map_err(|_| "hello")
     }
 
     pub fn is_windows_compatible(&self) -> bool {
@@ -244,7 +310,23 @@ impl Path {
     }
 
     pub fn is_unix_compatible(&self) -> bool {
-        self.segments.iter().all(|s| s.is_unix_compatible())
+        self.prefix.is_none()
+            && self.root.as_ref().is_none_or(|r| r == &Root::Normal)
+            && self.segments.iter().all(|s| s.is_unix_compatible())
+    }
+
+    #[cfg(feature = "std")]
+    pub fn to_std_path(&self) -> std::path::PathBuf {
+        self.into()
+    }
+
+    pub fn to_string(self) -> String {
+        self.builder().build_string()
+    }
+
+    #[cfg(feature = "std")]
+    pub fn to_os_string(self) -> OsString {
+        self.builder().build_os_string()
     }
 }
 
@@ -253,6 +335,25 @@ impl FromStr for Path {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         parser::parse_path(s)
+    }
+}
+
+#[cfg(feature = "std")]
+impl TryFrom<&OsStr> for Path {
+    type Error = &'static str;
+
+    fn try_from(value: &OsStr) -> Result<Self, Self::Error> {
+        let s = value.to_str().ok_or("Path must be valid UTF-8")?;
+        Path::from_str(s)
+    }
+}
+
+#[cfg(feature = "std")]
+impl TryFrom<OsString> for Path {
+    type Error = &'static str;
+
+    fn try_from(value: OsString) -> Result<Self, Self::Error> {
+        Path::try_from(value.as_os_str())
     }
 }
 
@@ -404,48 +505,52 @@ mod test {
     use super::*;
 
     #[rstest]
-    fn join() {
+    #[case("a/b/c", "d/e", "a/b/c/d/e")]
+    #[case("a/b/c", "", "a/b/c")]
+    #[case("", "d/e", "d/e")]
+    #[case("/a", "/b/c", "/b/c")]
+    #[case("c:/a", "b/c", "c:/a/b/c")]
+    #[case("c:/a", "c:b/c", "c:/a/b/c")]
+    #[case("c:a", "c:/b/c", "c:/b/c")]
+    #[case("a", "c:/b/c", "c:/b/c")]
+    #[case("c:a", "c:b/c", "c:a/b/c")]
+    #[case("/a", "c:b/c", "c:/a/b/c")]
+    #[case("/a", "c:/b/c", "c:/b/c")]
+    #[case("a", "c:b/c", "c:a/b/c")]
+    #[case("c:", "a", "c:a")]
+    #[case("c:", "/a", "c:/a")]
+    #[case("c:", "c:/a", "c:/a")]
+    #[case("a", "c:", "c:a")]
+    #[case("/a", "c:", "c:/a")]
+    #[case("c:/a", "c:", "c:/a")]
+    #[case("", "", "")]
+    fn join(#[case] left: &str, #[case] right: &str, #[case] expected: &str) {
         // arrange
-        let path1 = Path::from_str("a/b/c").unwrap();
-        let path2 = Path::from_str("d/e").unwrap();
+        let path1 = Path::from_str(left).unwrap();
+        let path2 = Path::from_str(right).unwrap();
 
         // act
-        let joined_path = path1.join(path2);
+        let joined_path = path1.join(path2).unwrap();
 
         // assert
-        assert_eq!(joined_path.segments.len(), 5);
-        let expected = Path::from_str("a/b/c/d/e").unwrap();
+        let expected = Path::from_str(expected).unwrap();
         assert_eq!(joined_path, expected);
     }
 
     #[rstest]
-    fn join2() {
+    #[case("c:/a", "d:b/c")]
+    #[case("d:/a", "c:")]
+    #[case("d:", "c:")]
+    fn join_should_fail(#[case] left: &str, #[case] right: &str) {
         // arrange
-        let path1 = Path::from_str("a/b/c").unwrap();
-        let path2 = Path::from_str("").unwrap();
+        let path1 = Path::from_str(left).unwrap();
+        let path2 = Path::from_str(right).unwrap();
 
         // act
         let joined_path = path1.join(path2);
 
         // assert
-        assert_eq!(joined_path.segments.len(), 3);
-        let expected = Path::from_str("a/b/c").unwrap();
-        assert_eq!(joined_path, expected);
-    }
-
-    #[rstest]
-    fn join3() {
-        // arrange
-        let path1 = Path::from_str("").unwrap();
-        let path2 = Path::from_str("d/e").unwrap();
-
-        // act
-        let joined_path = path1.join(path2);
-
-        // assert
-        assert_eq!(joined_path.segments.len(), 2);
-        let expected = Path::from_str("d/e").unwrap();
-        assert_eq!(joined_path, expected);
+        assert!(joined_path.is_err());
     }
 
     #[rstest]
@@ -555,8 +660,8 @@ mod test {
         let expected = expected.map(|e| Path::from_str(e).unwrap());
         assert_eq!(relative, expected);
 
-        let relative_str = relative.map(|p| p.builder().with_resolver().build());
-        let expected_str = expected.map(|p| p.builder().with_resolver().build());
+        let relative_str = relative.map(|p| p.builder().with_resolver().build_string());
+        let expected_str = expected.map(|p| p.builder().with_resolver().build_string());
         assert_eq!(relative_str, expected_str);
     }
 
@@ -872,7 +977,11 @@ mod test {
         assert!(path.is_ok());
         let path = path.unwrap();
 
-        let resolved = path.builder().with_separator('/').with_resolver().build();
+        let resolved = path
+            .builder()
+            .with_separator('/')
+            .with_resolver()
+            .build_string();
 
         assert!(resolved.is_ok());
         let resolved = resolved.unwrap();

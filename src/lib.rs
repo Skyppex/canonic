@@ -7,3 +7,6 @@ pub mod builder;
 mod packed_list;
 mod parser;
 pub mod path;
+
+#[cfg(feature = "std")]
+pub mod std_path;

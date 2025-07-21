@@ -1,4 +1,6 @@
 use core::marker::PhantomData;
+#[cfg(feature = "std")]
+use std::ffi::OsString;
 
 use alloc::string::String;
 
@@ -7,21 +9,19 @@ use crate::path::{Drive, Path, Prefix, Root};
 pub struct StringPathBuilder<T> {
     path: Path,
     separator: char,
-    resolve: bool,
-    traverse_symlinks: bool,
     _phantom_data: PhantomData<T>,
 }
 
-pub(crate) enum BaseState {}
-pub(crate) enum HasResolverState {}
+pub(crate) enum Base {}
+pub(crate) enum WithResolver {}
+pub(crate) enum WithSymlinkTraversal {}
+pub(crate) enum WithResolverAndSymlinkTraversal {}
 
-impl StringPathBuilder<BaseState> {
+impl StringPathBuilder<Base> {
     pub fn new(path: impl Into<Path>) -> Self {
-        StringPathBuilder::<BaseState> {
+        StringPathBuilder::<Base> {
             path: path.into(),
             separator: '/',
-            resolve: false,
-            traverse_symlinks: false,
             _phantom_data: PhantomData,
         }
     }
@@ -31,148 +31,153 @@ impl StringPathBuilder<BaseState> {
         self
     }
 
-    pub fn with_resolver(self) -> StringPathBuilder<HasResolverState> {
-        StringPathBuilder::<HasResolverState> {
+    pub fn with_resolver(self) -> StringPathBuilder<WithResolver> {
+        StringPathBuilder::<WithResolver> {
             path: self.path,
             separator: self.separator,
-            resolve: true,
-            traverse_symlinks: self.traverse_symlinks,
             _phantom_data: PhantomData,
         }
     }
 
-    pub fn traverse_symlinks(mut self, traverse_symlinks: bool) -> Self {
-        self.traverse_symlinks = traverse_symlinks;
-        self
+    pub fn traverse_symlinks(self) -> StringPathBuilder<WithSymlinkTraversal> {
+        StringPathBuilder::<WithSymlinkTraversal> {
+            path: self.path,
+            separator: self.separator,
+            _phantom_data: PhantomData,
+        }
     }
 
-    pub fn build(mut self) -> String {
-        if self.traverse_symlinks {
-            self.path = self.path.traverse_symlinks();
-        }
+    pub fn build_string(self) -> String {
+        build_path(self)
+    }
 
-        let mut result = String::new();
+    #[cfg(feature = "std")]
+    pub fn build_os_string(self) -> OsString {
+        OsString::from(self.build_string())
+    }
 
-        match self.path.prefix {
-            Some(Prefix::ExtendedPath) => {
-                result.push(self.separator);
-                result.push(self.separator);
-                result.push('?');
-                result.push(self.separator);
-            }
-            Some(Prefix::Device) => {
-                result.push(self.separator);
-                result.push(self.separator);
-                result.push('.');
-                result.push(self.separator);
-            }
-            None => {}
-        }
-
-        if let Some(Drive { letter }) = self.path.drive {
-            result.push(letter);
-            result.push(':');
-        }
-
-        match self.path.root {
-            Some(Root::Normal) => {
-                result.push(self.separator);
-            }
-            Some(Root::Unc) => {
-                if let Some(Prefix::ExtendedPath) = self.path.prefix {
-                    result.push_str("UNC");
-                    result.push(self.separator);
-                } else {
-                    result.push(self.separator);
-                    result.push(self.separator);
-                }
-            }
-            None => {}
-        }
-
-        let len = self.path.segments.len();
-        for (i, segment) in self.path.segments.into_iter().enumerate() {
-            result.push_str(&segment.0);
-
-            if i < len - 1 {
-                result.push(self.separator);
-            }
-        }
-
-        result
+    #[cfg(feature = "std")]
+    pub fn build_std_path(self) -> std::path::PathBuf {
+        std::path::PathBuf::from(self.build_string())
     }
 }
 
-impl StringPathBuilder<HasResolverState> {
-    pub fn with_separator(mut self, separator: impl Into<char>) -> Self {
-        self.separator = separator.into();
-        self
+impl StringPathBuilder<WithResolver> {
+    pub fn traverse_symlinks(self) -> StringPathBuilder<WithResolverAndSymlinkTraversal> {
+        StringPathBuilder::<WithResolverAndSymlinkTraversal> {
+            path: self.path,
+            separator: self.separator,
+            _phantom_data: PhantomData,
+        }
     }
 
-    pub fn traverse_symlinks(mut self, traverse_symlinks: bool) -> Self {
-        self.traverse_symlinks = traverse_symlinks;
-        self
+    pub fn build_string(mut self) -> Result<String, &'static str> {
+        self.path = self.path.resolve()?;
+        Ok(build_path(self))
     }
 
-    pub fn build(mut self) -> Result<String, &'static str> {
-        if self.resolve {
-            self.path = self.path.resolve()?;
-        }
-
-        if self.traverse_symlinks {
-            self.path = self.path.traverse_symlinks();
-        }
-
-        let mut result = String::new();
-
-        match self.path.prefix {
-            Some(Prefix::ExtendedPath) => {
-                result.push(self.separator);
-                result.push(self.separator);
-                result.push('?');
-                result.push(self.separator);
-            }
-            Some(Prefix::Device) => {
-                result.push(self.separator);
-                result.push(self.separator);
-                result.push('.');
-                result.push(self.separator);
-            }
-            None => {}
-        }
-
-        if let Some(Drive { letter }) = self.path.drive {
-            result.push(letter);
-            result.push(':');
-        }
-
-        match self.path.root {
-            Some(Root::Normal) => {
-                result.push(self.separator);
-            }
-            Some(Root::Unc) => {
-                if let Some(Prefix::ExtendedPath) = self.path.prefix {
-                    result.push_str("UNC");
-                    result.push(self.separator);
-                } else {
-                    result.push(self.separator);
-                    result.push(self.separator);
-                }
-            }
-            None => {}
-        }
-
-        let len = self.path.segments.len();
-        for (i, segment) in self.path.segments.into_iter().enumerate() {
-            result.push_str(&segment.0);
-
-            if i < len - 1 {
-                result.push(self.separator);
-            }
-        }
-
-        Ok(result)
+    #[cfg(feature = "std")]
+    pub fn build_os_string(self) -> Result<OsString, &'static str> {
+        self.build_string().map(|s| OsString::from(s))
     }
+
+    #[cfg(feature = "std")]
+    pub fn build_std_path(self) -> Result<std::path::PathBuf, &'static str> {
+        self.build_string().map(|s| std::path::PathBuf::from(s))
+    }
+}
+
+#[cfg(feature = "std")]
+impl StringPathBuilder<WithSymlinkTraversal> {
+    pub fn with_resolver(self) -> StringPathBuilder<WithResolverAndSymlinkTraversal> {
+        StringPathBuilder::<WithResolverAndSymlinkTraversal> {
+            path: self.path,
+            separator: self.separator,
+            _phantom_data: PhantomData,
+        }
+    }
+
+    pub fn build_string(mut self) -> Result<String, &'static str> {
+        self.path = self.path.traverse_symlinks()?;
+        Ok(build_path(self))
+    }
+
+    pub fn build_os_string(self) -> Result<OsString, &'static str> {
+        self.build_string().map(|s| OsString::from(s))
+    }
+
+    pub fn build_std_path(self) -> Result<std::path::PathBuf, &'static str> {
+        self.build_string().map(|s| std::path::PathBuf::from(s))
+    }
+}
+
+#[cfg(feature = "std")]
+impl StringPathBuilder<WithResolverAndSymlinkTraversal> {
+    pub fn build_string(mut self) -> Result<String, &'static str> {
+        self.path = self.path.resolve()?.traverse_symlinks()?;
+        Ok(build_path(self))
+    }
+
+    pub fn build_os_string(self) -> Result<OsString, &'static str> {
+        self.build_string().map(|s| OsString::from(s))
+    }
+
+    pub fn build_std_path(self) -> Result<std::path::PathBuf, &'static str> {
+        self.build_string().map(|s| std::path::PathBuf::from(s))
+    }
+}
+
+fn build_path<T>(builder: StringPathBuilder<T>) -> String {
+    let mut result = String::new();
+
+    match builder.path.prefix {
+        Some(Prefix::ExtendedPath) => {
+            result.push(builder.separator);
+            result.push(builder.separator);
+            result.push('?');
+            result.push(builder.separator);
+        }
+        Some(Prefix::Device) => {
+            result.push(builder.separator);
+            result.push(builder.separator);
+            result.push('.');
+            result.push(builder.separator);
+        }
+        None => {}
+    }
+
+    if let Some(Drive { letter }) = builder.path.drive {
+        result.push(letter);
+        result.push(':');
+    }
+
+    match builder.path.root {
+        Some(Root::Normal) => {
+            result.push(builder.separator);
+        }
+        Some(Root::Unc) => {
+            if let Some(Prefix::ExtendedPath) = builder.path.prefix {
+                result.push_str("UNC");
+                result.push(builder.separator);
+            } else {
+                result.push(builder.separator);
+                result.push(builder.separator);
+            }
+        }
+        None => {}
+    }
+
+    let len = builder.path.segments.len();
+
+    for (i, segment) in builder.path.segments.into_iter().enumerate() {
+        result.push_str(&segment.0);
+
+        if i < len - 1 {
+            result.push(builder.separator);
+        }
+    }
+
+    result
 }
 
 #[cfg(test)]
@@ -188,7 +193,7 @@ mod test {
         let path = Path::from_str("a/b/c").unwrap();
 
         // act
-        let string = StringPathBuilder::new(path).build();
+        let string = StringPathBuilder::new(path).build_string();
 
         // assert
         assert_eq!(string, "a/b/c");
@@ -200,7 +205,9 @@ mod test {
         let path = Path::from_str("a/b/c").unwrap();
 
         // act
-        let string = StringPathBuilder::new(path).with_separator('\\').build();
+        let string = StringPathBuilder::new(path)
+            .with_separator('\\')
+            .build_string();
 
         // assert
         assert_eq!(string, r"a\b\c");
@@ -214,7 +221,7 @@ mod test {
         // act
         let string = StringPathBuilder::new(path)
             .with_resolver()
-            .build()
+            .build_string()
             .unwrap();
 
         // assert
@@ -229,7 +236,7 @@ mod test {
         // act
         let string = StringPathBuilder::new(path)
             .with_resolver()
-            .build()
+            .build_string()
             .unwrap();
 
         // assert
@@ -244,7 +251,7 @@ mod test {
         // act
         let string = StringPathBuilder::new(path)
             .with_resolver()
-            .build()
+            .build_string()
             .unwrap();
 
         // assert
@@ -259,7 +266,7 @@ mod test {
         // act
         let string = StringPathBuilder::new(path)
             .with_resolver()
-            .build()
+            .build_string()
             .unwrap();
 
         // assert
@@ -274,7 +281,7 @@ mod test {
         // act
         let string = StringPathBuilder::new(path)
             .with_resolver()
-            .build()
+            .build_string()
             .unwrap();
 
         // assert
@@ -287,10 +294,23 @@ mod test {
         let path = Path::from_str(r"a/../b/c/../d").unwrap();
 
         // act
-        let string = path.builder().with_resolver().build().unwrap();
+        let string = path.builder().with_resolver().build_string().unwrap();
 
         // assert
         assert_eq!(string, "b/d");
+    }
+
+    #[cfg(not(feature = "std"))]
+    #[rstest]
+    fn build_with_resolver7() {
+        // arrange
+        let path = Path::from_str(r"~/a/../b/c/../d").unwrap();
+
+        // act
+        let string = path.builder().with_resolver().build_string().unwrap();
+
+        // assert
+        assert_eq!(string, "~/b/d");
     }
 
     #[rstest]
@@ -300,9 +320,9 @@ mod test {
         let path2 = path.clone().resolve().unwrap();
         let path3 = Path::from_str("b/d").unwrap();
 
-        let path = path.builder().build();
-        let path2 = path2.builder().with_resolver().build().unwrap();
-        let path3 = path3.builder().with_resolver().build().unwrap();
+        let path = path.builder().build_string();
+        let path2 = path2.builder().with_resolver().build_string().unwrap();
+        let path3 = path3.builder().with_resolver().build_string().unwrap();
 
         // assert
         assert_ne!(path, path2);
