@@ -6,7 +6,7 @@ use alloc::{
 };
 
 use crate::{
-    builder::StringPathBuilder,
+    builder::{BaseState, StringPathBuilder},
     packed_list::{Node, PathSegmentList},
     parser,
 };
@@ -29,7 +29,8 @@ impl Path {
         }
     }
 
-    pub fn builder(self) -> StringPathBuilder {
+    #[allow(private_interfaces)]
+    pub fn builder(self) -> StringPathBuilder<BaseState> {
         StringPathBuilder::new(self)
     }
 
@@ -554,8 +555,8 @@ mod test {
         let expected = expected.map(|e| Path::from_str(e).unwrap());
         assert_eq!(relative, expected);
 
-        let relative_str = relative.map(|p| p.builder().with_resolver(true).build());
-        let expected_str = expected.map(|p| p.builder().with_resolver(true).build());
+        let relative_str = relative.map(|p| p.builder().with_resolver().build());
+        let expected_str = expected.map(|p| p.builder().with_resolver().build());
         assert_eq!(relative_str, expected_str);
     }
 
@@ -871,11 +872,7 @@ mod test {
         assert!(path.is_ok());
         let path = path.unwrap();
 
-        let resolved = path
-            .builder()
-            .with_separator('/')
-            .with_resolver(true)
-            .build();
+        let resolved = path.builder().with_separator('/').with_resolver().build();
 
         assert!(resolved.is_ok());
         let resolved = resolved.unwrap();
