@@ -12,10 +12,10 @@ pub struct StringPathBuilder<T> {
     _phantom_data: PhantomData<T>,
 }
 
-pub(crate) enum Base {}
-pub(crate) enum WithResolver {}
-pub(crate) enum WithSymlinkTraversal {}
-pub(crate) enum WithResolverAndSymlinkTraversal {}
+pub enum Base {}
+pub enum WithResolver {}
+pub enum WithSymlinkTraversal {}
+pub enum WithResolverAndSymlinkTraversal {}
 
 impl StringPathBuilder<Base> {
     pub fn new(path: impl Into<Path>) -> Self {
