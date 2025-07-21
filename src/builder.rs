@@ -153,7 +153,11 @@ fn build_path<T>(builder: StringPathBuilder<T>) -> String {
 
     match builder.path.root {
         Some(Root::Normal) => {
-            result.push(builder.separator);
+            if !builder.path.prefix.is_some_and(|p| p == Prefix::Device)
+                || builder.path.drive.is_some()
+            {
+                result.push(builder.separator);
+            }
         }
         Some(Root::Unc) => {
             if let Some(Prefix::ExtendedPath) = builder.path.prefix {

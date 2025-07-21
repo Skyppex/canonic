@@ -11,14 +11,33 @@ use crate::{
     builder::{Base, StringPathBuilder},
     packed_list::{Node, PathSegmentList},
     parser,
+    zip_greedy::zip_greedy,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Eq)]
 pub struct Path {
     pub(crate) prefix: Option<Prefix>,
     pub(crate) drive: Option<Drive>,
     pub(crate) root: Option<Root>,
     pub(crate) segments: PathSegmentList,
+    pub(crate) is_dir: bool,
+}
+
+impl PartialEq for Path {
+    fn eq(&self, other: &Self) -> bool {
+        dbg!(self.prefix == other.prefix);
+        dbg!(self.drive == other.drive);
+        dbg!(self.root == other.root);
+        dbg!(self.segments == other.segments);
+        dbg!(self.is_root(), other.is_root());
+        dbg!(self.is_dir, other.is_dir);
+        dbg!(self.is_dir() == other.is_dir());
+        self.prefix == other.prefix
+            && self.drive == other.drive
+            && self.root == other.root
+            && self.segments == other.segments
+            && self.is_dir() == other.is_dir()
+    }
 }
 
 impl Path {
@@ -28,6 +47,7 @@ impl Path {
             prefix: None,
             drive: None,
             root: None,
+            is_dir: false,
         }
     }
 
@@ -40,8 +60,8 @@ impl Path {
         self.root.is_some()
     }
 
-    pub fn join(mut self, path: impl Into<Path>) -> Result<Self, &'static str> {
-        let path = path.into();
+    pub fn join(&self, path: impl AsRef<Path>) -> Result<Self, &'static str> {
+        let path = path.as_ref();
 
         if path.is_absolute() {
             if self.drive.is_some()
@@ -49,15 +69,17 @@ impl Path {
                 && self.prefix.is_none()
                 && self.segments.len() == 0
             {
-                let mut path = path;
-                path.drive = self.drive;
-                return Ok(path);
+                let mut path = path.clone();
+                path.drive = self.drive.clone();
+                return Ok(path.clone());
             }
 
-            return Ok(path);
+            return Ok(path.clone());
         }
 
-        match (&self.drive, path.drive) {
+        let mut result = self.clone();
+
+        match (&self.drive, &path.drive) {
             (
                 Some(Drive {
                     letter: self_letter,
@@ -66,19 +88,21 @@ impl Path {
                     letter: path_letter,
                 }),
             ) => {
-                if *self_letter != path_letter {
+                if *self_letter != *path_letter {
                     return Err("cannot join two paths from different drives");
                 }
             }
-            (None, Some(path_drive)) => self.drive = Some(path_drive),
+            (None, Some(path_drive)) => result.drive = Some(path_drive.clone()),
             _ => {}
         }
 
-        for segment in path.segments.into_iter() {
-            self.segments.push(segment);
+        for segment in path.segments.iter() {
+            result.segments.push(segment.clone());
         }
 
-        Ok(self)
+        result.is_dir = path.is_dir;
+
+        Ok(result)
     }
 
     pub fn root(&self) -> Option<Self> {
@@ -110,18 +134,26 @@ impl Path {
         !self.has_root()
     }
 
-    #[cfg(feature = "std")]
     pub fn is_file(&self) -> bool {
+        !self.is_root() && !self.is_dir
+    }
+
+    pub fn is_dir(&self) -> bool {
+        self.is_root() || self.is_dir
+    }
+
+    #[cfg(feature = "std")]
+    pub fn is_canonic_file(&self) -> bool {
         self.to_std_path().is_file()
     }
 
     #[cfg(feature = "std")]
-    pub fn is_dir(&self) -> bool {
+    pub fn is_canonic_dir(&self) -> bool {
         self.to_std_path().is_dir()
     }
 
     #[cfg(feature = "std")]
-    pub fn is_symlink(&self) -> bool {
+    pub fn is_canonic_symlink(&self) -> bool {
         self.to_std_path().is_symlink()
     }
 
@@ -185,6 +217,7 @@ impl Path {
             prefix: None,
             drive: None,
             root: None,
+            is_dir: false,
         })
     }
 
@@ -208,9 +241,11 @@ impl Path {
         self.segments.iter().map(|p| p.0.as_str()).collect()
     }
 
-    pub fn parent(mut self) -> Option<Path> {
-        self.segments.remove_last()?;
-        Some(self)
+    pub fn parent(&self) -> Option<Path> {
+        let mut parent = self.clone();
+        parent.segments.remove_last()?;
+        parent.is_dir = true;
+        Some(parent)
     }
 
     pub fn resolve(mut self) -> Result<Self, &'static str> {
@@ -328,6 +363,96 @@ impl Path {
     pub fn to_os_string(self) -> OsString {
         self.builder().build_os_string()
     }
+
+    pub fn diff(&self, path: impl AsRef<Path>) -> Option<Path> {
+        let path = path.as_ref();
+
+        if self.prefix != path.prefix {
+            return None;
+        }
+
+        if self.drive != path.drive {
+            return None;
+        }
+
+        if self.root != path.root {
+            return None;
+        }
+
+        let mut zipped = zip_greedy(self.segments.iter(), path.segments.iter()).peekable();
+
+        let Some((l, r)) = zipped.peek() else {
+            return Some(Path {
+                prefix: None,
+                drive: self.drive.clone(),
+                root: None,
+                segments: PathSegmentList::new(),
+                is_dir: false,
+            });
+        };
+
+        if l != r && self.root.is_none() {
+            return None;
+        }
+
+        if let (Some(PathSegment(l)), Some(PathSegment(r))) = (l, r) {
+            if l == ".." || r == ".." {
+                return None;
+            }
+        }
+
+        loop {
+            let Some((l, r)) = zipped.peek() else {
+                break;
+            };
+
+            if l != r {
+                break;
+            }
+
+            zipped.next();
+        }
+
+        let (li, ri): (Vec<_>, Vec<_>) = zipped.unzip();
+
+        let mut segments = PathSegmentList::new();
+
+        // add single . if...
+        // path is a file and self is its parent dir
+        // self and path are the same dir
+        dbg!(self.is_root(), path.is_root());
+
+        let mut is_dir = self.is_dir();
+
+        if (path.is_file() && self == &path.parent().expect("file must have a parent"))
+            || (self.is_dir() && self == path)
+        {
+            segments.push(".".to_string());
+            is_dir = true;
+        }
+
+        let mut count = ri.iter().flatten().count();
+
+        if path.is_file() && count != 0 {
+            count -= 1;
+        }
+
+        for _ in 0..count {
+            segments.push("..".to_string());
+        }
+
+        for s in li.iter().flatten() {
+            segments.push((*s).clone());
+        }
+
+        Some(Path {
+            prefix: None,
+            drive: self.drive.clone(),
+            root: None,
+            segments,
+            is_dir,
+        })
+    }
 }
 
 impl FromStr for Path {
@@ -364,6 +489,7 @@ impl From<PathSegmentList> for Path {
             prefix: None,
             drive: None,
             root: None,
+            is_dir: false,
         }
     }
 }
@@ -375,6 +501,7 @@ impl<P: Into<PathSegment>> From<P> for Path {
             prefix: None,
             drive: None,
             root: None,
+            is_dir: false,
         }
     }
 }
@@ -382,6 +509,12 @@ impl<P: Into<PathSegment>> From<P> for Path {
 impl Default for Path {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl AsRef<Path> for Path {
+    fn as_ref(&self) -> &Path {
+        self
     }
 }
 
@@ -523,6 +656,8 @@ mod test {
     #[case("a", "c:", "c:a")]
     #[case("/a", "c:", "c:/a")]
     #[case("c:/a", "c:", "c:/a")]
+    #[case("a/b/c", "./d/e", "a/b/d/e")]
+    #[case("a/b/c/", "../d/e", "a/b/c/../d/e")]
     #[case("", "", "")]
     fn join(#[case] left: &str, #[case] right: &str, #[case] expected: &str) {
         // arrange
@@ -663,6 +798,207 @@ mod test {
         let relative_str = relative.map(|p| p.builder().with_resolver().build_string());
         let expected_str = expected.map(|p| p.builder().with_resolver().build_string());
         assert_eq!(relative_str, expected_str);
+    }
+
+    #[rstest]
+    #[case("", true)]
+    #[case("/", false)]
+    #[case("/.", false)]
+    #[case("/./", false)]
+    #[case("/..", false)]
+    #[case("/../", false)]
+    #[case("file", true)]
+    #[case("file/", false)]
+    #[case(".file", true)]
+    #[case(".file/", false)]
+    #[case("dir/file", true)]
+    #[case("dir/file/", false)]
+    #[case("dir/", false)]
+    #[case("//", false)]
+    #[case("a/b.c", true)]
+    #[case("a/b.c/", false)]
+    #[case("a.b/c", true)]
+    #[case("a.b/c/", false)]
+    #[case("a/", false)]
+    #[case("a", true)]
+    #[case("a.b/", false)]
+    #[case("C:", true)]
+    #[case("C:/", false)]
+    #[case("C:/Users", true)]
+    #[case("C:/Users/", false)]
+    #[case("C:/file.txt", true)]
+    #[case("C:/file.txt/", false)]
+    #[case(r"\\", false)]
+    #[case(r"\\.", false)]
+    #[case(r"\\.\", false)]
+    #[case(r"\\?\UNC\", false)]
+    #[case(r"\\?\C:\", false)]
+    #[case(r"\\Server\Share", true)]
+    #[case(r"\\Server\Share\", false)]
+    #[case(r"\\Server\Share\foo", true)]
+    #[case(r"\\Server\Share\foo\", false)]
+    #[case(r"\\?\C:\foo", true)]
+    #[case(r"\\?\C:\foo\", false)]
+    #[case(r"\\.\COM1", true)]
+    #[case(r"\\.\COM1\", false)]
+    #[case("~/file.txt", true)]
+    #[case("~/file.txt/", false)]
+    #[case("~/dir/", false)]
+    #[case("~/dir", true)]
+    #[case("//?/UNC/server/share/file", true)]
+    #[case("//?/UNC/server/share/file/", false)]
+    fn is_file(#[case] path: &str, #[case] expected: bool) {
+        // arrange
+        let path = Path::from_str(path).unwrap();
+
+        // act
+        let result = path.is_file();
+
+        // assert
+        assert_eq!(result, expected);
+    }
+
+    #[rstest]
+    #[case("", false)]
+    #[case("/", true)]
+    #[case("/.", true)]
+    #[case("/./", true)]
+    #[case("/..", true)]
+    #[case("/../", true)]
+    #[case("file", false)]
+    #[case("file/", true)]
+    #[case(".file", false)]
+    #[case(".file/", true)]
+    #[case("dir/file", false)]
+    #[case("dir/file/", true)]
+    #[case("dir/", true)]
+    #[case("//", true)]
+    #[case("a/b.c", false)]
+    #[case("a/b.c/", true)]
+    #[case("a.b/c", false)]
+    #[case("a.b/c/", true)]
+    #[case("a/", true)]
+    #[case("a", false)]
+    #[case("a.b/", true)]
+    #[case("C:", false)]
+    #[case("C:/", true)]
+    #[case("C:/Users", false)]
+    #[case("C:/Users/", true)]
+    #[case("C:/file.txt", false)]
+    #[case("C:/file.txt/", true)]
+    #[case(r"\\", true)]
+    #[case(r"\\.", true)]
+    #[case(r"\\.\", true)]
+    #[case(r"\\?\UNC\", true)]
+    #[case(r"\\?\C:\", true)]
+    #[case(r"\\Server\Share", false)]
+    #[case(r"\\Server\Share\", true)]
+    #[case(r"\\Server\Share\foo", false)]
+    #[case(r"\\Server\Share\foo\", true)]
+    #[case(r"\\?\C:\foo", false)]
+    #[case(r"\\?\C:\foo\", true)]
+    #[case(r"\\.\COM1", false)]
+    #[case(r"\\.\COM1\", true)]
+    #[case("~/file.txt", false)]
+    #[case("~/file.txt/", true)]
+    #[case("~/dir/", true)]
+    #[case("~/dir", false)]
+    #[case("//?/UNC/server/share/file", false)]
+    #[case("//?/UNC/server/share/file/", true)]
+    fn is_dir(#[case] path: &str, #[case] expected: bool) {
+        // arrange
+        let path = Path::from_str(path).unwrap();
+
+        // act
+        let result = path.is_dir();
+
+        // assert
+        assert_eq!(result, expected);
+    }
+
+    #[rstest]
+    #[case("a/b/c/", "a/d/e/", Some("../../b/c/"))]
+    #[case("a/b/", "a/d/e/", Some("../../b/"))]
+    #[case("a/b/c/", "a/d/", Some("../b/c/"))]
+    #[case("c:/a/b/c/", "c:/a/d/", Some("c:../b/c/"))]
+    #[case("c:a/b/c/", "c:a/d/", Some("c:../b/c/"))]
+    #[case(r"\\.\a/b/c/", r"\\.\a/d/", Some("../b/c/"))]
+    #[case(r"\\?\c:\a\b\c\", r"\\?\c:\a\d\", Some("c:../b/c/"))]
+    #[case("c:/a/b/c", "c:a/d", None)]
+    #[case("c:a/b/c", "c:/a/d", None)]
+    #[case("a/b/c", "a/b/c", Some(""))]
+    #[case("a/b/", "a/b/c", Some("."))]
+    #[case("a/b/c", "a/b/", Some("c"))]
+    #[case("a/b/", "a/b/c/", Some(".."))]
+    #[case("/a/b/c/", "/a/b/", Some("c/"))]
+    #[case("/a/b/", "/a/b/c/", Some(".."))]
+    #[case("/a/b/c/", "/a/d/e/", Some("../../b/c/"))]
+    #[case("/a/b/c/", "a/b/c/", None)]
+    #[case("a/b/c/", "/a/b/c/", None)]
+    #[case("c:/a/b/c/", "c:/a/b/", Some("c:c/"))]
+    #[case("c:/a/b/", "c:/a/b/c/", Some("c:../"))]
+    #[case("c:/a/b/c", "d:/a/b", None)]
+    #[case("c:/a/b", "c:a/b", None)]
+    #[case("c:a/b/c/", "c:a/b/", Some("c:c/"))]
+    #[case("c:a/b/", "c:a/b/c/", Some("c:.."))]
+    #[case("~/a/b/", "~/a/c/", Some("../b/"))]
+    #[case("~/a/b", "/a/b", None)]
+    #[case("~/a/b", "a/b", None)]
+    #[case("../a/b", "../a/c", None)]
+    #[case("./a/b", "./a/c", Some("b"))]
+    #[case("/a/b/c/", "/a/b/c/d/e/", Some("../../"))]
+    #[case("/a/b/c/d/e", "/a/b/c/", Some("d/e"))]
+    #[case(r"\\?\c:\a\b\c\", r"\\?\c:\a\d\", Some("c:../b/c/"))]
+    #[case(r"\\.\a\b\c\", r"\\.\a\d\", Some("../b/c/"))]
+    #[case(r"\\?\UNC\server\share\a\", r"\\?\UNC\server\share\b\", Some("../a/"))]
+    #[case(r"\\.\C:\dir\file.txt", r"\\.\C:\dir\other.txt", Some("C:file.txt"))]
+    #[case(r"\\.\C:\dir\file.txt", r"\\.\D:\dir\file.txt", None)]
+    #[case(r"\\?\C:\foo\bar\", r"\\?\C:\foo\bar\baz\", Some("C:.."))]
+    #[case(r"\\?\C:\foo\bar\baz", r"\\?\C:\foo\bar", Some("C:baz"))]
+    #[case(r"\\?\C:/foo/bar", r"\\?\C:/foo/baz", Some("C:bar"))]
+    #[case(r"\\?\C:/foo/bar", r"\\?\D:/foo/bar", None)]
+    #[case(r"c:/Users/Alice", r"c:/Users/Bob", Some("c:Alice"))]
+    #[case(r"c:/a/b/c/", r"c:/a/b/c/Projects/", Some("c:../"))]
+    #[case(r"//Server/Share/a", r"//Server/Share/b", Some("a"))]
+    #[case(r"//Server/Share/a/b", r"//Server/Share/c/d", Some("../a/b"))]
+    #[case(r"\\?\UNC\srv\f\", r"\\?\UNC\srv\f\file.txt", Some("."))]
+    #[case(r"\\?\UNC\srv\s\f\", r"\\?\UNC\srv2\s\f\", Some("../../../srv/s/f/"))]
+    #[case(r"~/projects/foo", r"~/projects/bar", Some("foo"))]
+    #[case(r"~/projects/foo", r"/home/alice/projects/foo", None)]
+    #[case(r"/tmp/foo/", r"/tmp/bar/", Some("../foo/"))]
+    #[case(r"/tmp/foo", r"/var/tmp/foo", Some("../../tmp/foo"))]
+    #[case("../foo/bar", "./foo/bar", None)]
+    #[case("a/b/c", "..", None)]
+    #[case("../a/b", "../../a/b", None)]
+    #[case(r"\\.\COM1", r"\\.\COM2", Some("COM1"))]
+    #[case(r"\\.\COM1", r"\\.\COM1", Some(""))]
+    #[case(r"\\.\Drive0", r"\\.\Drive1", Some("Drive0"))]
+    #[case(r"C:/", r"C:/Users", Some("C:."))]
+    #[case(r"C:/", r"C:/Users/", Some("C:../"))]
+    #[case(r"C:/Users", r"C:/", Some("C:Users"))]
+    #[case(r"C:/Users/", r"C:/", Some("C:Users/"))]
+    #[case(r"C:foo/bar", r"C:foo/baz", Some("C:bar"))]
+    #[case(r"C:foo/bar", r"D:foo/bar", None)]
+    #[case(r"/", r"/usr/bin/", Some("../../"))]
+    #[case(r"/usr/bin/", r"/", Some("usr/bin/"))]
+    #[case(r"./foo/bar", r"foo/bar", None)]
+    #[case(r"C:/Users/Alice", r"C:/Users/Alice", Some("C:"))]
+    #[case(r"C:/Users/Alice/", r"C:/Users/Alice/", Some("C:./"))]
+    #[case(r"C:/Users/Alice/Documents", r"C:/Users/Alice/Documents", Some("C:"))]
+    #[case(r"\\?\D:\a", r"\\?\D:\a", Some("D:"))]
+    #[case(r"//?/UNC/server/share/a/", r"//?/UNC/server/share/a/b/", Some(".."))]
+    fn diff(#[case] left: &str, #[case] right: &str, #[case] expected: Option<&str>) {
+        // arrange
+        let left = Path::from_str(left).unwrap();
+        let right = Path::from_str(right).unwrap();
+
+        // act
+        let diff = left.diff(&right);
+
+        // assert
+        let expected = expected.map(|e| Path::from_str(e).unwrap());
+        dbg!(&diff, &expected);
+        assert_eq!(diff, expected);
     }
 
     #[rstest]
@@ -897,7 +1233,7 @@ mod test {
         assert!(path.prefix.is_some());
         assert_eq!(path.prefix.unwrap(), Prefix::Device);
         assert!(path.drive.is_none());
-        assert!(path.root.is_none());
+        assert!(path.root.is_some_and(|r| r == Root::Normal));
         assert_eq!(path.segments.len(), len);
     }
 

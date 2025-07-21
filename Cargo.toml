@@ -6,7 +6,7 @@ license = "MIT"
 description = "a library for structured paths"
 
 [features]
-default = ["alloc"]
+default = ["std"]
 alloc = []
 std = ["alloc", "dirs"]
 

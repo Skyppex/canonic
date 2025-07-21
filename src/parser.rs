@@ -12,15 +12,16 @@ pub fn parse_path(input: &str) -> Result<Path, &'static str> {
 fn parse(mut cursor: Cursor) -> Result<Path, &'static str> {
     let prefix = parse_prefix(&mut cursor);
     let drive = parse_drive(&mut cursor);
-    let root = parse_root(&mut cursor, &prefix)?;
+    let root = parse_root(&mut cursor, &prefix, drive.is_some())?;
 
-    let segments = parse_segments(&mut cursor)?;
+    let (segments, is_dir) = parse_segments(&mut cursor)?;
 
     Ok(Path {
         prefix,
         drive,
         root,
         segments,
+        is_dir,
     })
 }
 
@@ -61,25 +62,38 @@ fn parse_drive(cursor: &mut Cursor) -> Option<Drive> {
     }
 }
 
-fn parse_root(cursor: &mut Cursor, prefix: &Option<Prefix>) -> Result<Option<Root>, &'static str> {
-    if let Some(Prefix::ExtendedPath) = prefix {
-        let mut clone = cursor.clone();
-        let first = clone.eat();
-        let second = clone.eat();
-        let third = clone.eat();
+fn parse_root(
+    cursor: &mut Cursor,
+    prefix: &Option<Prefix>,
+    has_drive: bool,
+) -> Result<Option<Root>, &'static str> {
+    if let Some(prefix) = prefix {
+        match prefix {
+            Prefix::ExtendedPath => {
+                let mut clone = cursor.clone();
+                let first = clone.eat();
+                let second = clone.eat();
+                let third = clone.eat();
 
-        if let (Some('U'), Some('N'), Some('C')) = (first, second, third) {
-            cursor.eat(); // consume U
-            cursor.eat(); // consume N
-            cursor.eat(); // consume C
-            let slash = cursor.eat(); // consume '/' which must come here
-            let Some('/') = slash else {
-                return Err(
-                    r"extended-length UNC paths must have a slash after the \\?\UNC prefix",
-                );
-            };
+                if let (Some('U'), Some('N'), Some('C')) = (first, second, third) {
+                    cursor.eat(); // consume U
+                    cursor.eat(); // consume N
+                    cursor.eat(); // consume C
+                    let slash = cursor.eat(); // consume '/' which must come here
+                    let Some('/') = slash else {
+                        return Err(
+                            r"extended-length UNC paths must have a slash after the \\?\UNC prefix",
+                        );
+                    };
 
-            return Ok(Some(Root::Unc));
+                    return Ok(Some(Root::Unc));
+                }
+            }
+            Prefix::Device => {
+                if !has_drive {
+                    return Ok(Some(Root::Normal));
+                }
+            }
         }
     }
 
@@ -97,14 +111,16 @@ fn parse_root(cursor: &mut Cursor, prefix: &Option<Prefix>) -> Result<Option<Roo
     Ok(None)
 }
 
-fn parse_segments(cursor: &mut Cursor) -> Result<PathSegmentList, &'static str> {
+fn parse_segments(cursor: &mut Cursor) -> Result<(PathSegmentList, bool), &'static str> {
     let mut segments = Vec::new();
 
+    let mut last = '\0';
     while cursor.first().is_some() {
         let mut segment = String::new();
 
         while let Some(next) = cursor.eat() {
-            if next == '\\' || next == '/' {
+            last = next;
+            if next == '/' {
                 if segment.is_empty() {
                     return Err("path segments cannot be empty");
                 }
@@ -118,7 +134,8 @@ fn parse_segments(cursor: &mut Cursor) -> Result<PathSegmentList, &'static str> 
         segments.push(segment);
     }
 
-    Ok(segments.into_iter().collect())
+    let is_dir = last == '/' || last == '.';
+    Ok((segments.into_iter().collect(), is_dir))
 }
 
 #[derive(Debug, Clone)]
