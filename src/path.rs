@@ -25,13 +25,6 @@ pub struct Path {
 
 impl PartialEq for Path {
     fn eq(&self, other: &Self) -> bool {
-        dbg!(self.prefix == other.prefix);
-        dbg!(self.drive == other.drive);
-        dbg!(self.root == other.root);
-        dbg!(self.segments == other.segments);
-        dbg!(self.is_root(), other.is_root());
-        dbg!(self.is_dir, other.is_dir);
-        dbg!(self.is_dir() == other.is_dir());
         self.prefix == other.prefix
             && self.drive == other.drive
             && self.root == other.root
@@ -61,7 +54,7 @@ impl Path {
     }
 
     pub fn join(&self, path: impl AsRef<Path>) -> Result<Self, &'static str> {
-        let path = path.as_ref();
+        let mut path = path.as_ref().clone();
 
         if path.is_absolute() {
             if self.drive.is_some()
@@ -96,8 +89,13 @@ impl Path {
             _ => {}
         }
 
-        for segment in path.segments.iter() {
-            result.segments.push(segment.clone());
+        if self.is_file() && path.segments.head().is_some_and(|h| h.value.0 == ".") {
+            result = result.parent().expect("file must have a parent");
+            path.segments.remove(0);
+        }
+
+        for segment in path.segments.into_iter() {
+            result.segments.push(segment);
         }
 
         result.is_dir = path.is_dir;
@@ -245,6 +243,11 @@ impl Path {
         let mut parent = self.clone();
         parent.segments.remove_last()?;
         parent.is_dir = true;
+
+        if !parent.has_root() && parent.segments.len() == 0 {
+            parent.segments.push(".".to_string());
+        }
+
         Some(parent)
     }
 
@@ -416,12 +419,6 @@ impl Path {
         let (li, ri): (Vec<_>, Vec<_>) = zipped.unzip();
 
         let mut segments = PathSegmentList::new();
-
-        // add single . if...
-        // path is a file and self is its parent dir
-        // self and path are the same dir
-        dbg!(self.is_root(), path.is_root());
-
         let mut is_dir = self.is_dir();
 
         if (path.is_file() && self == &path.parent().expect("file must have a parent"))
@@ -762,16 +759,21 @@ mod test {
     }
 
     #[rstest]
-    fn parent() {
+    #[case("a/b", Some("a/"))]
+    #[case("a/b/", Some("a/"))]
+    #[case("/a/b", Some("/a/"))]
+    #[case("/a/b/", Some("/a/"))]
+    #[case("a", Some("./"))]
+    fn parent(#[case] path: &str, #[case] expected: Option<&str>) {
         // arrange
-        let path = Path::from_str("a/b/c").unwrap();
+        let path = Path::from_str(path).unwrap();
 
         // act
         let dirname = path.parent();
 
         // assert
-        let expected_parent = Path::from_str("a/b").unwrap();
-        assert_eq!(dirname, Some(expected_parent));
+        let expected = expected.map(|e| Path::from_str(e).unwrap());
+        assert_eq!(dirname, expected);
     }
 
     #[rstest]
@@ -997,7 +999,6 @@ mod test {
 
         // assert
         let expected = expected.map(|e| Path::from_str(e).unwrap());
-        dbg!(&diff, &expected);
         assert_eq!(diff, expected);
     }
 
