@@ -197,44 +197,10 @@ impl Path {
         Some(&basename[..last])
     }
 
-    pub fn relative_to(&self, base: &Path) -> Option<Self> {
-        if self.is_absolute() && base.is_absolute() && self.root() != base.root() {
-            return None;
-        }
-
-        let mut segments = self.segments.clone();
-        let mut base_segments = base.segments.clone();
-
-        // Remove common prefix
-        while segments.head.is_some() && base_segments.head.is_some() {
-            let segment = &segments[segments.head.unwrap()].value;
-            let base_segment = &base_segments[base_segments.head.unwrap()].value;
-
-            if segment != base_segment {
-                break;
-            }
-
-            segments.remove(segments.head.unwrap());
-            base_segments.remove(base_segments.head.unwrap());
-        }
-
-        let len = base_segments.len();
-
-        if len == base.segments.len() {
-            return None;
-        }
-
-        for _ in 0..len {
-            segments.push_start("..".to_string());
-        }
-
-        Some(Path {
-            segments,
-            prefix: None,
-            drive: None,
-            root: None,
-            is_dir: false,
-        })
+    #[cfg(feature = "std")]
+    pub fn with_cwd_base(&self) -> Result<Self, &'static str> {
+        let cwd = std::env::current_dir().map_err(|_| "failed to get cwd")?;
+        Path::try_from(cwd)?.join(self)
     }
 
     pub fn extension(&self) -> Option<&str> {
@@ -350,6 +316,15 @@ impl Path {
 
         self.segments = traverse(self.segments, head_index);
         Ok(self)
+    }
+
+    pub fn resolve_at(&self, base: impl AsRef<Path>) -> Result<Self, &'static str> {
+        self.join(base.as_ref())?.resolve()
+    }
+
+    #[cfg(feature = "std")]
+    pub fn resolve_at_cwd(&self) -> Result<Self, &'static str> {
+        self.with_cwd_base()?.resolve()
     }
 
     #[cfg(feature = "std")]
@@ -826,32 +801,6 @@ mod test {
         // assert
         let expected = expected.map(|e| Path::from_str(e).unwrap());
         assert_eq!(dirname, expected);
-    }
-
-    #[rstest]
-    #[case("a/b/c", "b/b/c", None)]
-    #[case("a/b/c", "a/b", Some("c"))]
-    #[case("a/b/c", "a/b/d", Some("../c"))]
-    #[case("a/b/c", "a/d/e", Some("../../b/c"))]
-    #[case("a/b/.c", "a/b", Some(".c"))]
-    #[case("a/b/.c", "a/b/d", Some("../.c"))]
-    #[case("a/b/c.d", "a/b/d", Some("../c.d"))]
-    #[case("a/b/c.d", "a/b.d", Some("../b/c.d"))]
-    fn relative_to(#[case] path: &str, #[case] base: &str, #[case] expected: Option<&str>) {
-        // arrange
-        let path = Path::from_str(path).unwrap();
-        let base = Path::from_str(base).unwrap();
-
-        // act
-        let relative = path.relative_to(&base);
-
-        // assert
-        let expected = expected.map(|e| Path::from_str(e).unwrap());
-        assert_eq!(relative, expected);
-
-        let relative_str = relative.map(|p| p.builder().with_resolver().build_string());
-        let expected_str = expected.map(|p| p.builder().with_resolver().build_string());
-        assert_eq!(relative_str, expected_str);
     }
 
     #[rstest]
@@ -1375,5 +1324,18 @@ mod test {
         assert!(resolved.is_ok());
         let resolved = resolved.unwrap();
         assert_eq!(resolved, expected);
+    }
+
+    #[cfg(feature = "std")]
+    #[rstest]
+    fn resolve_at_cwd() {
+        let path = Path::from_str(".local/").unwrap();
+
+        let resolved = path.resolve_at_cwd().unwrap();
+
+        assert_eq!(
+            resolved,
+            Path::from_str("/home/brage/dev/code/canonic/.local/").unwrap()
+        );
     }
 }

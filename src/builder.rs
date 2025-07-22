@@ -14,8 +14,12 @@ pub struct StringPathBuilder<T> {
 
 pub enum Base {}
 pub enum WithResolver {}
+pub enum WithBase {}
 pub enum WithSymlinkTraversal {}
+pub enum WithResolverAndBase {}
 pub enum WithResolverAndSymlinkTraversal {}
+pub enum WithSymlinkTraversalAndBase {}
+pub enum WithResolverSymlinkTraversalAndBase {}
 
 impl StringPathBuilder<Base> {
     pub fn new(path: impl Into<Path>) -> Self {
@@ -24,6 +28,16 @@ impl StringPathBuilder<Base> {
             separator: '/',
             _phantom_data: PhantomData,
         }
+    }
+
+    pub fn with_base(mut self, base: impl AsRef<Path>) -> Result<Self, &'static str> {
+        self.path = self.path.join(base)?;
+        Ok(self)
+    }
+
+    pub fn with_cwd_base(mut self) -> Result<Self, &'static str> {
+        self.path = self.path.with_cwd_base()?;
+        Ok(self)
     }
 
     pub fn with_separator(mut self, separator: impl Into<char>) -> Self {
@@ -71,6 +85,16 @@ impl StringPathBuilder<WithResolver> {
         }
     }
 
+    pub fn with_base(mut self, base: impl AsRef<Path>) -> Result<Self, &'static str> {
+        self.path = self.path.join(base)?;
+        Ok(self)
+    }
+
+    pub fn with_cwd_base(mut self) -> Result<Self, &'static str> {
+        self.path = self.path.with_cwd_base()?;
+        Ok(self)
+    }
+
     pub fn build_string(mut self) -> Result<String, &'static str> {
         self.path = self.path.resolve()?;
         Ok(build_path(self))
@@ -97,6 +121,16 @@ impl StringPathBuilder<WithSymlinkTraversal> {
         }
     }
 
+    pub fn with_base(mut self, base: impl AsRef<Path>) -> Result<Self, &'static str> {
+        self.path = self.path.join(base)?;
+        Ok(self)
+    }
+
+    pub fn with_cwd_base(mut self) -> Result<Self, &'static str> {
+        self.path = self.path.with_cwd_base()?;
+        Ok(self)
+    }
+
     pub fn build_string(mut self) -> Result<String, &'static str> {
         self.path = self.path.traverse_symlinks()?;
         Ok(build_path(self))
@@ -116,6 +150,16 @@ impl StringPathBuilder<WithResolverAndSymlinkTraversal> {
     pub fn build_string(mut self) -> Result<String, &'static str> {
         self.path = self.path.resolve()?.traverse_symlinks()?;
         Ok(build_path(self))
+    }
+
+    pub fn with_base(mut self, base: impl AsRef<Path>) -> Result<Self, &'static str> {
+        self.path = self.path.join(base)?;
+        Ok(self)
+    }
+
+    pub fn with_cwd_base(mut self) -> Result<Self, &'static str> {
+        self.path = self.path.with_cwd_base()?;
+        Ok(self)
     }
 
     pub fn build_os_string(self) -> Result<OsString, &'static str> {

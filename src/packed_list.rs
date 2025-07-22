@@ -50,37 +50,6 @@ impl PathSegmentList {
         }
     }
 
-    pub(crate) fn push_start(&mut self, value: impl Into<PathSegment>) {
-        let value = value.into();
-        let index = if let Some(free_index) = self.free_list.pop() {
-            free_index
-        } else {
-            self.nodes.len()
-        };
-
-        if index >= self.nodes.len() {
-            self.nodes.push(Node {
-                value,
-                prev: None,
-                next: None,
-            });
-        } else {
-            self.nodes[index].value = value;
-            self.nodes[index].prev = None;
-            self.nodes[index].next = None;
-        }
-
-        if self.head.is_none() {
-            self.head = Some(index);
-            self.tail = Some(index);
-        } else {
-            let old_head = self.head.unwrap();
-            self.nodes[old_head].prev = Some(index);
-            self.nodes[index].next = Some(old_head);
-            self.head = Some(index);
-        }
-    }
-
     pub(crate) fn push(&mut self, value: impl Into<PathSegment>) {
         let value = value.into();
         let index = if let Some(free_index) = self.free_list.pop() {
