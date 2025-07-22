@@ -94,13 +94,31 @@ impl Path {
             path.segments.remove(0);
         }
 
+        result.is_dir = if path.segments.len() > 0 || path.is_root() {
+            path.is_dir
+        } else {
+            self.is_dir
+        };
+
         for segment in path.segments.into_iter() {
             result.segments.push(segment);
         }
 
-        result.is_dir = path.is_dir;
-
         Ok(result)
+    }
+
+    pub fn with_basename(&self, basename: impl AsRef<str>) -> Result<Self, &'static str> {
+        let basename = basename.as_ref();
+        let mut result = self.clone().resolve()?;
+
+        if result.segments.remove_last().is_some() {
+            if result.segments.len() > 0 {
+                result.is_dir = true;
+            }
+        }
+
+        let path = Path::from_str(basename)?.resolve()?;
+        result.join(path)
     }
 
     pub fn root(&self) -> Option<Self> {
@@ -663,6 +681,40 @@ mod test {
 
         // act
         let joined_path = path1.join(path2).unwrap();
+
+        // assert
+        let expected = Path::from_str(expected).unwrap();
+        assert_eq!(joined_path, expected);
+    }
+
+    #[rstest]
+    #[case("a/b/c", "d/e", "a/b/d/e")]
+    #[case("a/b/c", "", "a/b/")]
+    #[case("", "d/e", "d/e")]
+    #[case("/a", "/b/c", "/b/c")]
+    #[case("c:/a", "b/c", "c:/b/c")]
+    #[case("c:/a", "c:b/c", "c:/b/c")]
+    #[case("c:a", "c:/b/c", "c:/b/c")]
+    #[case("a", "c:/b/c", "c:/b/c")]
+    #[case("c:a", "c:b/c", "c:b/c")]
+    #[case("/a", "c:b/c", "c:/b/c")]
+    #[case("/a", "c:/b/c", "c:/b/c")]
+    #[case("a", "c:b/c", "c:b/c")]
+    #[case("c:", "a", "c:a")]
+    #[case("c:", "/a", "c:/a")]
+    #[case("c:", "c:/a", "c:/a")]
+    #[case("a", "c:", "c:")]
+    #[case("/a", "c:", "c:/")]
+    #[case("c:/a", "c:", "c:/")]
+    #[case("a/b/c", "./d/e", "a/b/d/e")]
+    #[case("a/b/c/", "../d/e", "a/b/../d/e")]
+    #[case("", "", "")]
+    fn with_basename(#[case] left: &str, #[case] right: &str, #[case] expected: &str) {
+        // arrange
+        let path = Path::from_str(left).unwrap();
+
+        // act
+        let joined_path = path.with_basename(right).unwrap();
 
         // assert
         let expected = Path::from_str(expected).unwrap();
